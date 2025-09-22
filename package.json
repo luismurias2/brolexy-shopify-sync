@@ -1,0 +1,12 @@
+{
+  "name": "brolexy-shopify-sync",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "sync.js",
+  "scripts": {
+    "start": "node sync.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
+}
