@@ -1,129 +1,111 @@
-import fetch from "node-fetch";
-import crypto from "crypto";
+/**
+ * sync.js
+ * Sincroniza produtos da Brolexy para Shopify
+ */
 
-// -------------------------
-// Configurações via ambiente
-// -------------------------
-const publicKey = process.env.BRO_PUBLIC_KEY;
-const secretKey = process.env.BRO_SECRET_KEY;
-const shopifyToken = process.env.SHOPIFY_TOKEN;
-const shopName = process.env.SHOP_NAME;
+import fetch from 'node-fetch';
+import crypto from 'crypto';
 
-// Alterna entre "dev" e "prod"
-const env = process.env.BRO_ENV || "dev"; // dev = teste, prod = produção
-const BRO_API_BASE = env === "prod" ? "https://app.brolexy.com" : "https://dev.brolexy.com";
+// Environment variables
+const BRO_PUBLIC_KEY = process.env.BRO_PUBLIC_KEY;
+const BRO_SECRET_KEY = process.env.BRO_SECRET_KEY;
+const SHOPIFY_STORE = process.env.SHOPIFY_STORE; // exemplo: "minhaloja"
+const SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN; // Admin API token
 
-// -------------------------
-// Função para gerar assinatura Brolexy
-// -------------------------
-function generateSignature(secretKey) {
-  const time = Math.floor(Date.now() / 1000).toString();
-  const hmac = crypto.createHmac("sha256", secretKey);
-  hmac.update(time);
-  const signature = hmac.digest("base64");
-  return { time, signature };
+if (!BRO_PUBLIC_KEY || !BRO_SECRET_KEY || !SHOPIFY_STORE || !SHOPIFY_TOKEN) {
+  console.error("❌ Faltam variáveis de ambiente (BRO_PUBLIC_KEY, BRO_SECRET_KEY, SHOPIFY_STORE, SHOPIFY_TOKEN)");
+  process.exit(1);
 }
 
-// -------------------------
-// Buscar produtos Brolexy
-// -------------------------
-async function getBrolexyProducts() {
-  const { time, signature } = generateSignature(secretKey);
-
-  const res = await fetch(`${BRO_API_BASE}/api/products`, {
-    headers: { publicKey, time, signature }
-  });
-
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+// Função para gerar a assinatura HMAC
+function generateSignature(secretKey, timestamp) {
+  return crypto.createHmac('sha256', secretKey)
+    .update(timestamp.toString())
+    .digest('base64');
 }
 
-// -------------------------
-// Verifica se produto existe no Shopify pelo SKU
-// -------------------------
-async function findShopifyProductBySKU(sku) {
-  const url = `https://${shopName}.myshopify.com/admin/api/2025-01/products.json?limit=250&fields=id,title,variants`;
-  const res = await fetch(url, {
-    headers: { "X-Shopify-Access-Token": shopifyToken }
-  });
-  if (!res.ok) throw new Error(await res.text());
-  const data = await res.json();
-  for (const product of data.products) {
-    for (const variant of product.variants) {
-      if (variant.sku === sku) return { product, variant };
-    }
-  }
-  return null;
-}
+// Função para buscar produtos da Brolexy
+async function fetchBrolexyProducts() {
+  const time = Math.floor(Date.now() / 1000);
+  const signature = generateSignature(BRO_SECRET_KEY, time);
 
-// -------------------------
-// Criar ou atualizar produto no Shopify
-// -------------------------
-async function syncToShopify(product) {
-  const sku = `BRO-${product.productId}`;
-  const existing = await findShopifyProductBySKU(sku);
-
-  const body = existing
-    ? {
-        product: {
-          id: existing.product.id,
-          title: product.name,
-          body_html: `Categoria: ${product.category}, Região: ${product.region}`,
-          variants: [
-            {
-              id: existing.variant.id,
-              price: product.price,
-              inventory_quantity: product.inStock
-            }
-          ]
-        }
-      }
-    : {
-        product: {
-          title: product.name,
-          body_html: `Categoria: ${product.category}, Região: ${product.region}`,
-          variants: [
-            {
-              price: product.price,
-              sku: sku,
-              inventory_quantity: product.inStock
-            }
-          ]
-        }
-      };
-
-  const url = existing
-    ? `https://${shopName}.myshopify.com/admin/api/2025-01/products/${existing.product.id}.json`
-    : `https://${shopName}.myshopify.com/admin/api/2025-01/products.json`;
-
-  const res = await fetch(url, {
-    method: existing ? "PUT" : "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": shopifyToken
-    },
-    body: JSON.stringify(body)
-  });
-
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-// -------------------------
-// Fluxo principal
-// -------------------------
-(async () => {
   try {
-    console.log(`🔎 A buscar produtos da Brolexy (${env})...`);
-    const products = await getBrolexyProducts();
+    const res = await fetch('https://dev.brolexy.com/api/products', {
+      method: 'GET',
+      headers: {
+        'publicKey': BRO_PUBLIC_KEY,
+        'time': time,
+        'signature': signature,
+        'Content-Type': 'application/json'
+      }
+    });
 
-    for (const p of products) {
-      console.log(`➡️  Sincronizando: ${p.name}`);
-      await syncToShopify(p);
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(JSON.stringify(error));
     }
 
-    console.log("✅ Sincronização concluída!");
+    const data = await res.json();
+    console.log(`✅ ${data.length} produtos encontrados na Brolexy`);
+    return data;
   } catch (err) {
-    console.error("❌ Erro:", err.message);
+    console.error('❌ Erro ao buscar produtos da Brolexy:', err.message);
+    return [];
   }
-})();
+}
+
+// Função para criar/atualizar produto na Shopify
+async function upsertShopifyProduct(product) {
+  const url = `https://${SHOPIFY_STORE}.myshopify.com/admin/api/2025-01/products.json`;
+
+  const body = {
+    product: {
+      title: product.name,
+      body_html: `<strong>Categoria:</strong> ${product.category}<br><strong>Região:</strong> ${product.region}`,
+      variants: [
+        {
+          price: product.price,
+          sku: String(product.productId),
+          inventory_quantity: product.inStock,
+        }
+      ]
+    }
+  };
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Shopify-Access-Token': SHOPIFY_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(JSON.stringify(error));
+    }
+
+    const result = await res.json();
+    console.log(`✅ Produto "${product.name}" enviado para Shopify`);
+    return result;
+  } catch (err) {
+    console.error(`❌ Erro ao enviar "${product.name}" para Shopify:`, err.message);
+  }
+}
+
+// Função principal
+async function main() {
+  console.log('🔎 A buscar produtos da Brolexy (dev)...');
+  const products = await fetchBrolexyProducts();
+
+  for (const product of products) {
+    await upsertShopifyProduct(product);
+  }
+
+  console.log('🎉 Sincronização concluída!');
+}
+
+// Executa
+main();
